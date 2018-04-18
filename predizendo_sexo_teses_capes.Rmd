@@ -1,0 +1,216 @@
+---
+layout: post
+title: "Predizendo sexo a partir de nomes próprios no R com o genderBR"
+date: 2018-04-19
+output: github_document
+---
+
+```{r setup, include=FALSE}
+
+# Pacotes
+library(microbenchmark)
+library(hrbrthemes)
+library(tidyverse) 
+library(extrafont)
+library(genderBR)
+library(knitr)
+
+
+# Dados
+load("teses_capes.Rda")
+
+
+# Graficos
+cores <- c("gray70", "black")
+fonte <- "PT Sans"
+
+
+# Output
+opts_chunk$set(dev = "png", 
+               dev.args = list(type = "cairo-png", antialias = "subpixel"),
+               fig.path = "figs/",
+               fig.align = 'center',
+               fig.width = 7,
+               fig.height = 5)
+
+
+# Microbench
+times <- 100
+nomes <- c("Guilherme", "Maria", "Ana", "Arnaldo", "Martha", "Carlos", "Almir", "Cida")
+tempo <- microbenchmark(API = get_gender(nomes, internal = F), Interno = get_gender(nomes), times = times)
+interno <- mean(tempo$time[tempo$expr == "Interno"]) / 1000000000
+api <- mean(tempo$time[tempo$expr == "API"]) / 1000000000
+```
+
+Para quem trabalha com bases de dados públicas, não é incomum encontrar o seguinte problema: ter disponível em alguma coluna o nome de várias pessoas, mas não a informação sobre o sexo delas. Para lidar com esse problema, há alguns meses desenvolvi um pacote para `R`, o [genderBR](https://cran.r-project.org/web/packages/genderBR/index.html), que oferece um método simples para resolvê-lo: usando dados do [Censo de 2010 do IBGE](https://censo2010.ibge.gov.br/nomes/), ele inferie o sexo de uma pessoa a partir de seu nome próprio (como descrito em maiores detalhes [aqui](http://fmeireles.com/blog/rstats/genderbr-predizer-sexo)). Comparado à tarefa manual de classificar sexo a partir desses nomes, o método não só é infinitamente mais rápido, mas também evita erros de imputação, tornando replicável qualquer pesquisa que o use.
+
+Apesar da utilidade do pacote para resolver esse problema, ele fazia isso com algumas limitações. A principal delas é a de tempo gasto na tarefa, às vezes na casa de horas ou dias. Basicamente, isso ocorre por causa da forma com que a principal função do pacote, `get_gender`, faz predições: para cada nome solicitado, ela envia uma requisição ao serviço online de nomes do IBGE (daqui para frente, [API](https://pt.wikipedia.org/wiki/Interface_de_programa%C3%A7%C3%A3o_de_aplica%C3%A7%C3%B5es)), recebe as informações necessárias e, com base nelas, calcula a probabilidade desse nome pertencer a um a homem ou a uma mulher. Como esse processo consome cerca de 0.1 segundos, as consequências são inevitáveis: para 10 mil nomes, a função pode facilmente rodar por mais de 15 horas.
+
+A partir da recém lançada versão do pacote, contudo, isso deixou de ser um problema. Aproveitando que o IBGE divulgou a [base de dados que alimenta a API do serviço de nomes](http://www.consultaesic.cgu.gov.br/busca/dados/Lists/Pedido/Item/displayifs.aspx?List=0c839f31-47d7-4485-ab65-ab0cee9cf8fe&ID=557307&Web=88cc5f44-8cfe-4964-8ff4-376b5ebb3bef), agora o `genderBR` dispõe internamente dessas informações. Especificamente, a função `get_gender` ganhou um argumento opcional, `internal`, que permite escolher entre usar os dados internos do pacote (`internal = TRUE`, que agora é o padrão) ou requisitar os dados da API (`internal = FALSE`). Optando pelo primeiro, o processo de predizer nomes consome poucos segundos -- e isso mesmo em bases com milhares ou milhões de nomes próprios.^[A única ressalva, aqui, é que esse método só está disponível quando outro argumento, `state`, não é declarado. Com isso, apenas pela API do IBGE é possível obter predições considerando variação entre estados.]
+
+
+### Como usar o genderBR
+
+O primeiro passo para usar o `genderBR` é simples: com o `R` aberto, só é necessário executar `install.packages("genderBR")` para instalá-lo. Feito isso, predizer sexo a partir de nomes próprios é uma questão de chamar a função `get_gender`:
+
+
+```{r}
+# Carrega o pacote
+library(genderBR)
+
+# Prediz o sexo de oito nomes
+nomes <- c("Guilherme", "Maria", "Ana", "Arnaldo", "Martha", "Carlos", "Almir", "Cida")
+get_gender(nomes)
+
+```
+
+Mais útil que isso, é possível predizer o sexo de nomes contidos numa base de dados, adicionando o resultado dessa predição numa nova variável. Exemplo:
+
+```{r}
+base <- data.frame(nome = c("Ana Maria", "Roberto Silva", "Marcia Campos"),
+                   idade = c(25, 42, 33),
+                   grupo = c("A", "A", "B")
+                   )
+
+base$sexo <- get_gender(base$nome)
+
+base
+```
+
+Nos dois casos, as predições usam os dados internos ao pacote. Para desabilitar essa opção, fazendo requisições diretamente à API do IBGE, basta declarar como falso o argumento `internal`: `get_gender(nomes, internal = FALSE)`. Como mostro na sequência, entretanto, usar essa opção consome muito mais tempo. 
+
+
+### O desempenho da nova versão do genderBR
+
+Quão rápido é predizer o sexo usando os dados internos do pacote `genderBR`? A título de ilustração, podemos comparar o tempo gasto para predizer o sexo daqueles `r length(nomes)` nomes do primeiro exemplo usando a API do IBGE, i.e. `internal = FALSE`, e os dados internos do pacote, `internal = TRUE`. Repeti essa operação `r times` vezes com cada método, registrando o tempo gasto para concluir a predição em cada uma. Resultado: com os dados internos, o pacote leva cerca de `r round(interno, 2)` segundos para concluir a predição dos `r length(nomes)` nomes, em média; já usando a API do IBGE, o tempo necessário gira em torno de `r round(api, 2)` segundos. Em outras palavras, o novo método adicionado ao pacote é cerca de `r round(api / interno)` vezes mais rápido nesse exemplo.
+
+Na verdade, usar os dados internos é ainda mais rápido se levarmos em conta as pausas entre requisições, aplicadas pela função `get_gender` quando o número de nomes a serem consultados na API do IBGE excede 100. Além disso, os ganhos em escala do método interno são imensos porque ele consome quase o mesmo tempo para predizer o sexo de 100, 1000, ou 10000 nomes. Isso, de novo, não acontece ao usar a opção `internal = FALSE` para extrair dados da API do IBGE.
+
+Em resumo, predizer sexo a partir de nomes próprios com o `genderBR` ficou extremamente mais rápido.
+
+
+### Exemplo: sexo de autores de teses de Doutorado no Brasil
+
+Para exemplificar os usos do pacote `genderBR`, classifiquei o sexo de autores(as) de todas as `r nrow(teses)` teses de Doutorado defendidas no Brasil entre 1987 e 2016. Esses dados vêm do [Banco de Teses e Dissertações da Capes](http://catalogodeteses.capes.gov.br/catalogo-teses/#!/), disponíveis no novo [portal de dados abertos](https://dadosabertos.capes.gov.br/) da instituição -- onde também estão outros sobre a composição dos programas de pós-graduação no país, ou sobre a produção acadêmica de doscentes e discentes, por exemplo.
+
+O importante a notar é que a Capes disponibiliza apenas informações sobre instituição, área de avaliação e nome dos autores das teses defendidas no período, mas não o sexo de quem as defendeu.^[Os dados do Banco de Teses e Dissertações da Capes têm muitos problemas, como *missings*, campos preenchidos de forma incorreta, incosistência de classificação em alguns anos, entre outros. Como meu objetivo é apenas exemplificar o pacote, fiz uma limpeza superficial na base. Os dados e o código usados nesse post, de qualquer forma, podem ser encontrados aqui.] É aí que entra o `genderBR`: usando os dados internos do pacote, predizer o sexo para todos os nomes na base leva *menos de 5 segundos*. Com essa informação, podemos criar um gráfico como esse.
+
+
+```{r genderbr1, echo=FALSE}
+# Total por ano
+teses %>%
+  group_by(ano, sexo) %>%
+  summarise(teses = n()) %>%
+  ggplot(aes(x = ano, y = teses, fill = sexo)) + geom_area(alpha = 0.85) +
+  theme_minimal(base_family = fonte) + theme(legend.position = "bottom") +
+  scale_fill_grey() +
+  scale_x_continuous(breaks = seq(1988, 2016, by = 4)) +
+  labs(x = NULL, y = "Número de teses defendidas",
+       title = "Teses defendidas por classificação de sexo no Brasil",
+       subtitle = "Nomes classificados usando o genderBR package, 1987-2016",
+       fill = "Sexo")
+```
+
+O gráfico acima ilustra bem o trabalho do `genderBR`: ele classificou a imensa maioria dos nomes como pertencendo a homens ou mulheres (`r scales::percent(round(nrow(teses[teses$sexo %in% c("Homem", "Mulher"),]) / nrow(teses), 2))` do total). Ainda assim, como os dados disponibilizados pelo IBGE incluem apenas nomes com mais de 20 ocorrências no país, alguns na base da Capes, cerca de `r scales::percent(round(nrow(teses[teses$sexo == "Desconhecido",]) / nrow(teses), 2))` deles, foram classificados como *Desconhecido*, o que indica que não encontraram correspondência. Em outros casos, nomes classificados podem ser tanto de homens quanto de mulheres -- como Ariel, Darci, Noá e Elir, por exemplo --, dificultando a tarefa de atribuir sexo (os *Unissex* do gráfico). De qualquer forma, como é possível ver, ambos os casos são residuais.
+
+Voltando ao gráfico, dá para notar que mulheres defenderam cerca de metade das teses registradas no banco da Capes no período. Entretanto, como o número de defesas era pequeno até os anos 2000 -- em 1987, por exemplo, apenas `r nrow(teses[teses$ano == 1987,])` teses defendidas foram registradas, e mesmo em 2000 esse número ainda era de apenas `r nrow(teses[teses$ano == 2000,])` --, acompanhar o crescimento absoluto, ano a ano, dessa série dificulta detectar tendências. Por essa razão, podemos focar apenas na percentagem de teses defendidas por mulheres, excluindo da base pessoas com sexo classificado como *Desconhecido* ou *Unissex*.
+
+
+```{r genderbr2, echo=FALSE}
+# Total por ano
+teses %>%
+  filter(sexo %in% c("Homem", "Mulher")) %>%
+  group_by(ano) %>%
+  mutate(total = n()) %>%
+  group_by(ano, sexo) %>%
+  summarise(teses = n() / total[1]) %>%
+  ggplot(aes(x = ano, y = teses, fill = sexo)) + 
+  geom_area(alpha = 0.6) +
+  geom_hline(yintercept = 0.5, linetype = 2) +
+  theme_minimal(base_family = fonte) + theme(legend.position = "bottom") +
+  scale_fill_manual(values = cores) +
+  scale_y_percent() +
+  labs(x = NULL, y = NULL,
+       title = "Percentagem de teses defendidas no Brasil por sexo",
+       subtitle = "Nomes classificados usando o genderBR package, 1987-2016",
+       fill = "Sexo")
+
+```
+
+A tendência geral, agora, é clara: com o passar do tempo, mulheres aumentaram sua participação na defesa de teses no Brasil.
+
+#### Defesas de tese por grandes áreas
+
+O mesmo padrão, entretanto, certamente varia entre áreas: pode ser que mulheres defendam mais teses em algumas grandes áreas da Capes, menos em outras. Como o Banco de Teses contém variáveis indicando essas grandes áreas, verificar isso é relativamente simples.
+
+```{r genderbr3, echo=FALSE, fig.height=8, fig.width=7}
+# Total por ano e grande area
+teses %>%
+  filter(!grande_area %in% c("MULTIDISCIPLINAR", "Não informada")) %>%
+  filter(sexo %in% c("Homem", "Mulher")) %>%
+  group_by(ano, grande_area) %>%
+  mutate(total = n()) %>%
+  group_by(ano, sexo, grande_area) %>%
+  summarise(teses = n() / total[1]) %>%
+  ggplot(aes(x = ano, y = teses, fill = sexo)) + geom_hline(yintercept = 0.5, linetype = 2) +
+  geom_area(alpha = 0.6) +
+  facet_wrap(~ grande_area, ncol = 2) +
+  theme_minimal(base_family = fonte) + theme(legend.position = "bottom") +
+  scale_y_percent() + scale_fill_manual(values = cores) +
+  labs(x = NULL, y = NULL, fill = "Sexo",
+       title = "Teses defendidas por sexo no Brasil",
+       subtitle = "Percentagem de teses defendidas por grande área, 1987-2016")
+```
+
+Por um lado, mulheres defendem mais teses no Brasil, ao menos nos últimos anos. Por outro lado, é possível ver que essa participação é desigual entre grandes áreas da Capes: mulheres defendem mais teses nas Ciências Biológicas, nas Humanas e nas Letras; homens, entretanto, estão sobrerrepresentados nas áreas de Engenharia e Exatas. O gradual aumento no número de mulheres defendendo teses não ocorreu nessas duas últimas.
+
+#### Defesas de tese por área de avaliação
+
+Enquanto que classificar o sexo de autores(as) de teses por grande área revela um cenário detalhado da participação de mulheres, é possível ir além com os dados da Capes. Em especial, podemos usar a classificação por área de avaliação, que é usada para classificar os programas de pós-graduação no país. Aqui, vou fazer isso para algumas dessas: para a Ciência Política, separadamente, e em algumas outras, mais próximas dessa. Os resultados, também aqui, mostram que mulheres participam mais na produção e defesa de teses em algumas áreas; já em outras, inclusa a Ciência Política, a presença delas fica aquém -- às vezes muito aquém -- da de homens.
+
+
+```{r genderbr4, echo=FALSE}
+# Ciência política
+teses %>%
+  filter(area == "CIÊNCIA POLÍTICA E RELAÇÕES INTERNACIONAIS") %>%
+  filter(sexo %in% c("Homem", "Mulher")) %>%
+  group_by(ano, sexo) %>%
+  summarise(teses = n()) %>%
+  ggplot(aes(x = ano, y = teses, color = sexo)) + geom_line(alpha = 0.8, size = 0.9) +
+  theme_minimal(base_family = fonte) + theme(legend.position = "bottom") +
+  scale_color_manual(values = cores) +
+  labs(x = NULL, y = NULL, color = "Sexo",
+       title = "Teses defendidas na Ciência Política",
+       subtitle = "Número de teses defendidas por sexo, 1987-2016")
+```
+
+
+```{r genderbr5, echo=FALSE, fig.height=8, fig.width=7}
+# Outras areas proximas
+teses %>%
+  filter(area %in% c("ANTROPOLOGIA / ARQUEOLOGIA", "DIREITO", "ECONOMIA", "HISTÓRIA", "EDUCAÇÃO", "SOCIOLOGIA")) %>%
+  filter(sexo %in% c("Homem", "Mulher")) %>%
+  group_by(ano, area, sexo) %>%
+  summarise(teses = n()) %>%
+  ggplot(aes(x = ano, y = teses, color = sexo)) + geom_line(alpha = 0.8, size = 0.9) +
+  facet_wrap(~ area, scales = "free_y", ncol = 2) +
+  theme_minimal(base_family = fonte) + theme(legend.position = "bottom") +
+  scale_color_manual(values = cores) +
+  labs(x = NULL, y = NULL, color = "Sexo",
+       title = "Teses defendidas em áreas selecionadas",
+       subtitle = "Número de teses defendidas por sexo na Economia, História, Direito e Antropologia, 1987-2016")
+```
+
+
+### Final
+
+Classificar por sexo autores(as) de teses no Brasil é apenas uma das utilidades do `genderBR`. Usando as mesmas fontes de dados, na verdade, é possível investigar as causas da variação na participação de homens e mulheres na produção de teses; mapear a distribuição de doscentes e discentes por sexo em todos os programas de pós-graduação; ou, ainda, aplicar o mesmo método para classificar qualquer outro tipo de produção por sexo do(a) autor(a). Isso tudo, note-se, apenas com os dados da Capes, o que está longe de esgotar todas as aplicações possíveis do pacote.
+
+A mensagem mais geral desse texto, entretanto, é outra: com a nova atualização, usar o `genderBR` para predizer sexo a partir de nomes próprios ficou muito mais rápido. Como o exemplo anterior indica, isso pode ser feito em poucos segundos mesmo em bases de dados grandes; quando os nomes próprios estão formatados de diferentes maneiras; e lenvando em conta diferenças no uso de nomes por sexo entre estados (ver [aqui](http://fmeireles.com/blog/rstats/genderbr-predizer-sexo)) -- nesse caso, usando a API do IBGE. Como já discuti no texto da versão anterior do pacote, as predições do `genderBR`, além disso, são bastante precisas: nos testes que realizei, o método prediz o sexo a partir de um nome de forma correta mais de 99% das vezes, além de produzir poucos *missings*, como no caso do exemplo anterior. Tudo somado, o `genderBR` não só é incomparavelmente mais rápido do que classificar manualmente sexo a partir de nomes, mas também mais recomendado para evitar erros de imputação e contribuir para a replicabilidade de qualquer pesquisa que o use.
+
+#### Dados e cógido
+
+Os dados e o código usados nesse posto podem ser encontrados aqui. Como o pacote `genderBR` é open source, qualquer um pode consultar ou trabalhar em cima do seu código, disponível no [GitHub](https://github.com/meirelesff/genderBR). Críticas e sugestões são bem-vindos.
+
+
+
